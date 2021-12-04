@@ -2,7 +2,8 @@
 # - The base host must be debian buster
 # - You MUST clone rtpengine's repo before launching this.
 
-FROM debian:10-slim
+# FROM debian:10-slim
+FROM ubuntu:20.04
 
 ADD rtpengine/ /rtpengine
 WORKDIR /rtpengine
