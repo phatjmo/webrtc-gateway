@@ -1,0 +1,3 @@
+[submodule "rtpengine-docker/rtpengine"]
+	path = rtpengine-docker/rtpengine
+	url = git@github.com:sipwise/rtpengine.git

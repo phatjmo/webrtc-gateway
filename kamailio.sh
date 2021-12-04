@@ -1,0 +1,242 @@
+#!/bin/bash -e
+
+/config.sh
+
+export KAMAILIO_PKG=${KAMAILIO_PKG:-24} 
+export KAMAILIO_SHR=${KAMAILIO_SHR:-64} 
+export KAMAILIO_CFG=${KAMAILIO_CFG:-/etc/kamailio/kamailio.cfg}
+export KAMAILIO_BIN=$(which kamailio)
+export KAMAILIO_VER=$($KAMAILIO_BIN -V | grep "version:" | awk '{ print $3 }')
+
+function dontrun {
+# Create number table
+cat <<EOF > /usr/share/kamailio/dbtext/number
+id(int) number(string) is_hearing(int) in_use(int)
+EOF
+
+# Populate the number table
+/download-numbers.sh
+# Populate the aliases table
+/download-aliases.sh
+# Populate the subscribers table
+/download-users.sh
+
+# Remove the initial id column, as it breaks everything, and allow ha1b to be null
+cat <<EOF > /usr/share/kamailio/dbtext/kamailio/subscriber
+username(string) domain(string) password(string) email_address(string) ha1(string) ha1b(string,null) rpid(string,null)
+EOF
+
+# Populate the domain table
+cat <<EOF > /etc/kamailio/dbtext/domain
+id(int,auto) domain(string) did(string,null) last_modified(int)
+1:${SIP_DOMAIN:-registrar.service.consul}::$(date +%s)
+2:${REGISTRAR_DNS:-acetest-registrar.${DNS_DOMAIN}}::$(date +%s)
+3:${PUBLIC_DNS:-acetest.${DNS_DOMAIN}}::$(date +%s)
+4:${DNS_ALIAS1:-${PROJECT}-registrar.${DNS_DOMAIN}}::$(date +%s)
+5:${DNS_ALIAS2:-acetest-hub.${DNS_DOMAIN}}::$(date +%s)
+6:${DNS_ALIAS3:-acetest.service.consul}::$(date +%s)
+7:localhost::$(date +%s)
+EOF
+}
+
+if [ -n "$DOCKER_IP" ]; then
+  PUBLIC_IP=${DOCKER_IP}
+fi
+
+# Discover public and private IP for this instance
+set +e
+if [ -z "$PUBLIC_IP" ] ; then
+  PUBLIC_IP="${PUBLIC_IP:-$(curl --fail -qsH 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip)}"
+fi
+if [ -z "$PUBLIC_IP" ] ; then
+  PUBLIC_IP="$(curl --fail -qs http://169.254.169.254/2014-11-05/meta-data/public-ipv4)"
+fi
+
+export SOURCE_TAG=${SOURCE_TAG:-UNDEFINED}
+export CD_HOST=${CD_HOST:-locahost}
+export CD_PORT=${CD_PORT:-8000}
+export VM_HOST=${VM_HOST}
+export VM_PORT=${VM_PORT}
+export HOST_IP=${HOST_IP:-${PUBLIC_IP}}
+export LISTEN_IP=${LISTEN_IP:-$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)}	
+# 'Port assignments
+export LISTEN_SUBNET=${LISTEN_SUBNET:-$(echo ${LISTEN_IP} | cut -d"." -f1-2).0.0\/16}
+export HOST_SUBNET=${HOST_SUBNET:-$(echo ${HOST_IP} | cut -d"." -f1-3).0\/24}
+export LISTEN_SIP=${LISTEN_SIP:-25060}
+export LISTEN_TLS=${LISTEN_TLS:-25061}
+export LISTEN_WSS=${LISTEN_WSS:-25443}
+export LISTEN_WS=${LISTEN_WS:-25080}
+export LISTEN_RPC=${LISTEN_RPC:-${LISTEN_SIP}}
+export PUBLIC_DNS=${PUBLIC_DNS:-sip.${DNS_DOMAIN}}
+export REGISTRAR_DNS=${REGISTRAR_DNS:-${PUBLIC_DNS}}
+export HUB_DNS=${HUB_DNS:-${PUBLIC_DNS}}
+export REGISTRAR_PORT_SIP=${REGISTRAR_PORT_SIP:-25060}
+export HUB_PORT_SIP=${HUB_PORT_SIP:-25060}
+export DNS_ALIAS1 DNS_ALIAS2 DNS_ALIAS3
+if [ -z "$RTPENGINE_HOSTS" ]; then
+  RTPENGINE_HOSTS=udp:$(ip ro show dev eth0 | awk '/default/ {print $3}'):60000
+fi
+export RTPENGINE_HOSTS=$RTPENGINE_HOSTS
+export SOLVES_ADDR=${SOLVES_ADDR:-}
+export SOLVES_PORT=${SOLVES_PORT:-5060}
+export SOLVES_QUEUE=${SOLVES_QUEUE:-}
+export SOLVES_LCR_ID=${SOLVES_LCR_ID:-1}
+export APN_URL=${APN_URL:-https://${APN_DOMAIN}/notify}
+
+#export RTP_PORT_RANGE_START=${RTP_PORT_RANGE_START:-16000}
+#export RTP_PORT_RANGE_END=${RTP_PORT_RANGE_END:-16100}
+
+if [ -z "$DBURL" ]; then
+  export DBURL=$(echo "${KAMAILIO_DBENGINE:-mysql}" | tr '[:upper:]' '[:lower:]')://${KAMAILIO_DBRWUSER:-kamailio}:${KAMAILIO_DBRWPW:-kamailiorw}@${KAMAILIO_DBHOST:-localhost}/${KAMAILIO_DBNAME:-kamailio}
+fi
+
+#export OPTIONS=${OPTIONS:-WITH_REGISTRAR WITH_HUB WITH_WEBRTC WITH_TLS WITH_AUTH WITH_IPAUTH WITH_NAT WITH_NATSIPPING WITH_SIPCAPTURE WITH_USRLOCDB WITH_DBTEXT WITH_MULTIDOMAIN WITH_ALIASDB WITH_PRESENCE}
+export OPTIONS=${OPTIONS:-WITH_REGISTRAR WITH_SOLVES WITH_TLS WITH_AUTH WITH_IPAUTH WITH_NAT WITH_NATSIPPING WITH_SIPCAPTURE WITH_USRLOCDB WITH_MYSQL WITH_MULTIDOMAIN WITH_ALIASDB WITH_PRESENCE}
+
+mkdir -p /etc/kamailio/tls
+if [ -n "${WILDCARD_SSL_CA_CHAIN}" ]; then
+  echo ${WILDCARD_SSL_CA_CHAIN} | base64 -d > /etc/kamailio/tls/wildcard_ssl_ca_chain.pem
+fi
+if [ -n "${WILDCARD_SSL_PRIVATE_KEY}" ]; then
+  echo ${WILDCARD_SSL_PRIVATE_KEY} | base64 -d > /etc/kamailio/tls/wildcard_ssl_private_key.pem
+fi
+if [ -n "${WILDCARD_SSL_CERTIFICATE}" ]; then
+  echo ${WILDCARD_SSL_CERTIFICATE} | base64 -d > /etc/kamailio/tls/wildcard_ssl_certificate.pem
+fi
+if [ -n "${WILDCARD_SSL_CA_CHAIN}" ] && \
+   [ -n "${WILDCARD_SSL_PRIVATE_KEY}" ] && \
+   [ -n "${WILDCARD_SSL_CERTIFICATE}" ]; then
+  OPTIONS="${OPTIONS} WITH_TLS"
+fi
+
+if [ "${KAMAILIO_VER:0:1}" -ge "5" ]; then
+  OPTIONS="${OPTIONS} WITH_CONTACTSIZE"
+fi
+
+cat <<EOF > /etc/kamailio/kamailio-local.cfg
+#############################################################
+#                                                           #
+#               Kamailio Version: ${KAMAILIO_VER}                     #
+#    This file was generated by kamailio.sh at runtime.     #
+#                     DO NOT EDIT!                          #
+#                                                           #
+#############################################################
+
+## Variable substitutions in kamailio.cfg
+#!substdef "/LISTEN_IP/${LISTEN_IP}/g"
+#!substdef "/HOST_IP/${HOST_IP}/g"
+#!substdef "!HOST_SUBNET!${HOST_SUBNET}!g"
+#!substdef "!LISTEN_SUBNET!${LISTEN_SUBNET}!g"
+
+#!substdef "/DNS_DOMAIN/${DNS_DOMAIN}/g"
+#!substdef "/SIP_DOMAIN/${SIP_DOMAIN}/g"
+#!substdef "/PUBLIC_IP/${PUBLIC_IP}/g"
+#!substdef "/LISTEN_SIP/${LISTEN_SIP}/g"
+#!substdef "/LISTEN_TLS/${LISTEN_TLS}/g"
+#!substdef "/LISTEN_WSS/${LISTEN_WSS}/g"
+#!substdef "/LISTEN_WS/${LISTEN_WS}/g"
+#!substdef "/LISTEN_RPC/${LISTEN_RPC}/g"
+
+#!substdef "/PUBLIC_DNS/${PUBLIC_DNS}/g"
+#!substdef "/DNS_ALIAS1/${DNS_ALIAS1}/g"
+#!substdef "/DNS_ALIAS2/${DNS_ALIAS2}/g"
+#!substdef "/DNS_ALIAS3/${DNS_ALIAS3}/g"
+#!substdef "/REGISTRAR_DNS/${REGISTRAR_DNS}/g"
+#!substdef "/HUB_DNS/${HUB_DNS}/g"
+#!substdef "/REGISTRAR_PORT_SIP/${REGISTRAR_PORT_SIP}/g"
+#!substdef "/HUB_PORT_SIP/${HUB_PORT_SIP}/g"
+#!substdef "/RTPENGINE_HOSTS/${RTPENGINE_HOSTS}/g"
+#!substdef "/SOURCE_TAG/${SOURCE_TAG}/g"
+#!substdef "/CD_HOST/${CD_HOST}/g"
+#!substdef "/CD_PORT/${CD_PORT}/g"
+#!substdef "/LOGTAG//g"
+# [\$rm] -- Source IP: <\$si> - Dest IP: <\$di> - R-URI: <\$ru> - From: <\$fu> - To: <\$tu> - CallID: <\$ci>/g"
+#--!substdef "/DBURL/${DBURL}/g"
+#!define DBURL "${DBURL}"
+#!substdef "/SOLVES_ADDR/${SOLVES_ADDR}/g"
+#!substdef "/SOLVES_PORT/${SOLVES_PORT}/g"
+#!substdef "/SOLVES_QUEUE/${SOLVES_QUEUE}/g"
+#!substdef "/SOLVES_LCR_ID/${SOLVES_LCR_ID}/g"
+#!substdef "/HOMER_SERVER/${HOMER_SERVER}/g"
+#!substdef "/HOMER_PORT/${HOMER_PORT}/g"
+#!substdef "/HOMER_PROTOCOL/${HOMER_PROTOCOL}/g"
+#!substdef "/VM_HOST/${VM_HOST}/g"
+#!substdef "/VM_PORT/${VM_PORT}/g"
+#!substdef "/BANDWIDTH_USER_ID/${BANDWIDTH_USER_ID}/g"
+#!substdef "/BANDWIDTH_TOKEN/${BANDWIDTH_TOKEN}/g"
+#!substdef "/BANDWIDTH_SECRET/${BANDWIDTH_SECRET}/g"
+#!substdef "/XHTTP_PORT/${XHTTP_PORT}/g"
+#!substdef "!APN_URL!${APN_URL}!g"
+#!substdef "!RTPENGINE_SVCKEY!${RTPENGINE_SVCKEY}!g"
+#!substdef "!KAMAILIO_VER!${KAMAILIO_VER}!g"
+
+#--Examples:
+#--!define WITH_REGISTRAR
+#--!define WITH_HUB
+#--!define WITH_WEBRTC
+## The following are the enabled options for this instance
+$(for OPTION in ${OPTIONS}
+ do
+ 	echo "#!define ${OPTION}"
+ done
+ )
+EOF
+
+cat <<EOF > /etc/kamailio/tls.cfg
+[server:default]
+method = TLSv1
+verify_certificate = no
+require_certificate = no
+private_key = /etc/kamailio/tls/wildcard_ssl_private_key.pem
+certificate = /etc/kamailio/tls/wildcard_ssl_certificate.pem
+ca_list = /etc/kamailio/tls/wildcard_ssl_ca_chain.pem
+#crl = ./modules/tls/crl.pem
+#verify_depth = 3
+
+[client:default]
+verify_certificate = no
+require_certificate = no
+EOF
+
+mkdir -p /etc/mysql/conf.d/ || true
+cat <<EOF > /etc/mysql/conf.d/kamailio.cnf
+[kamailio]
+socket = /var/run/mysqld/mysqld.sock
+user = ${KAMAILIO_DBRWUSER}
+password = ${KAMAILIO_DBRWPW}
+default-character-set = utf8
+EOF
+
+# This assumes we can access these environment variables. 
+envsubst < "httpconnections.cfg.template" > "/etc/kamailio/httpconnections.cfg"
+
+/wait-for-it.sh -h ${KAMAILIO_DBHOST:-localhost} -p ${KAMAILIO_DBPORT:-3306} -t 60 --strict --quiet -- echo "MySQL is up"
+
+#cat --number $KAMAILIO_CFG
+
+cat <<EOF > /etc/supervisor/conf.d/kamailio.conf
+[program:kamailio]
+command=/bin/bash -c ". /kamailio.env; exec /supervise_kamailio.sh"
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_events_enabled=true
+stderr_events_enabled=true
+EOF
+
+env | grep -v affinity:container | xargs -l1 -i% echo export '"%"' > /kamailio.env
+
+if [ -f /var/run/supervisord.pid ]; then
+  rm -f /var/run/supervisord.pid
+fi
+
+if [ -f /var/run/kamailio/kamailio.pid ]; then
+  rm -f /var/run/kamailio/kamailio.pid
+fi
+
+if [ -x /usr/bin/supervisord ]; then
+  exec /usr/bin/supervisord -n ${SUPERVISORD_OPTS:--c /etc/supervisor/supervisord.conf}
+else
+  echo "*** $0: NO SUPERVISORD - WHAT DO I DO?"
+  exit 1
+fi
