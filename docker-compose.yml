@@ -47,6 +47,8 @@ services:
       context: ./kamailio-docker/
       dockerfile: Dockerfile
     network_mode: host
+    volumes:
+      - ${CERT_PATH}:/vol/ssl:ro
     environment:
       KAM_DEFINE_DB_MOD_FILE: "db_sqlite.so"
       KAM_DEFINE_DBURL: "sqlite:////etc/kamailio/kamailio.sqlite"
