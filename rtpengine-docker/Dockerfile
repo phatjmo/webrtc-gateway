@@ -3,7 +3,7 @@
 # - You MUST clone rtpengine's repo before launching this.
 
 # FROM debian:10-slim
-FROM ubuntu:20.04
+FROM ubuntu:18.04
 
 ADD rtpengine/ /rtpengine
 WORKDIR /rtpengine
