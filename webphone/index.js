@@ -19049,7 +19049,7 @@
   const webSocketServer = `wss://${serverDNS}:10443`;
   serverSpan.innerHTML = webSocketServer;
   // Destination URI
-  const target = `sip:8727105388@${serverDNS}`;
+  const target = `sip:18727105388@${serverDNS}`;
   targetSpan.innerHTML = target;
   // Name for demo user
   const displayName = "ConnectAndSell WebRTC Demo";
