@@ -19120,11 +19120,17 @@
   });
   // Add click listener to call button
   callButton.addEventListener("click", () => {
+      userName = 'user';
+      password = 'password';
       callButton.disabled = true;
       hangupButton.disabled = true;
       simpleUser
           .call(target, {
-          inviteWithoutSdp: false
+          inviteWithoutSdp: false,
+          extraHeaders: [
+              `X-CAS-User: ${userName}`,
+              `X-CAS-Password: ${password}`
+          ]
       })
           .catch((error) => {
           console.error(`[${simpleUser.id}] failed to place call`);
