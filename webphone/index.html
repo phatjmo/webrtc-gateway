@@ -33,6 +33,18 @@
   <p>
     When the call is established, the remote audio is added to the following HTML5 audio element...
   </p>
+  <div id="container">
+    <div class="select">
+      <label for="refreshDevices">Refresh Devices</label><button id="refreshDevices">Refresh</button>
+    </div>
+    <div class="select">
+      <label for="audioSource">Change Microphone: </label><select id="audioSource"></select>
+    </div>
+
+    <div class="select">
+      <label for="audioOutput">Change Speaker: </label><select id="audioOutput"></select>
+    </div>
+  </div>
   <audio id="remoteAudio" controls>
     <p>Your browser doesn't support HTML5 audio.</p>
   </audio>
@@ -78,7 +90,7 @@
 
   <script src="./index.js"
     onerror="alert('To run this demo you must first build the library and demo source! See the README.')">
-    </script>
+  </script>
 </body>
 
 </html>
